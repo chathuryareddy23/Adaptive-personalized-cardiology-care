@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Heart Beat with ECG</title>
+<style>
+body { margin:0; overflow:hidden; background:#f0f0f0; }
+
+#bpmDisplay {
+    position:absolute; top:20px; left:50%; transform:translateX(-50%);
+    font-family:Arial; font-size:24px; font-weight:bold; color:#ff0000;
+    background:rgba(255,255,255,0.7); padding:10px 20px; border-radius:10px; z-index:10;
+}
+
+#otherValues {
+    position:absolute; top:70px; left:50%; transform:translateX(-50%);
+    font-family:Arial; font-size:18px; color:#000;
+    background:rgba(255,255,255,0.7); padding:8px 15px; border-radius:10px; z-index:10;
+}
+
+/* Wrapper for ECG label + canvas */
+#ecgWrapper {
+    position: absolute;
+    right: 250px;
+    top: 50%; /* center the block vertically */
+    transform: translateY(-50%);
+    width: 400px;
+}
+
+/* Label above the canvas */
+#ecgLabel {
+    width: 100%;
+    text-align: center;
+    font-family: Arial;
+    font-size: 18px;
+    font-weight: bold;
+    color: #000;
+    background: rgba(255,255,255,0.7);
+    padding: 5px 0;
+    border-radius: 5px;
+    margin-bottom: 5px; /* spacing between label and canvas */
+}
+
+/* ECG canvas */
+#ecgCanvas {
+    width: 100%;
+    height: 300px;
+    background: #000;
+    border-radius: 10px;
+    display: block;
+}
+</style>
+</head>
+<body>
+
+<div id="bpmDisplay">BPM: 70</div>
+<div id="otherValues">BP: 120/80 | SpO2: 98%</div>
+
+<div id="ecgWrapper">
+    <div id="ecgLabel">ECG Waveform</div>
+    <canvas id="ecgCanvas"></canvas>
+</div>
+
+<script src="./three.min.js"></script>
+<script src="./GLTFLoader.js"></script>
+
+<script>
+// THREE.JS setup
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xf0f0f0);
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth/window.innerHeight, 0.1, 100);
+camera.position.set(0,0,4);
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const light = new THREE.DirectionalLight(0xffffff,1.5);
+light.position.set(5,5,5);
+scene.add(light);
+scene.add(new THREE.AmbientLight(0x555555));
+
+// Heart model
+let heart;
+const loader = new THREE.GLTFLoader();
+loader.load("realistic_human_heart.glb", gltf=>{
+    heart = gltf.scene;
+    heart.scale.set(1.2,1.2,1.2);
+    heart.position.set(-1.2,0,0);
+    scene.add(heart);
+});
+
+// DOM Elements
+const bpmDisplay = document.getElementById("bpmDisplay");
+const otherValues = document.getElementById("otherValues");
+const ecgCanvas = document.getElementById("ecgCanvas");
+const ecgCtx = ecgCanvas.getContext("2d");
+ecgCanvas.width = 400;
+ecgCanvas.height = 300;
+
+// ------------------ ECG CODE START ------------------
+
+// ECG data
+let bpm = 70;
+let ecgData = [];
+let ecgScroll = [];
+let dataRecords = [];
+let currentIndex = 0;
+let scrollOffset = 0;
+const beatsVisible = 3;
+const pointSpacing = 5; // spacing increased for readability
+
+// Draw ECG with glow, pulsing grid, and trailing fade
+function drawECG(){
+    if(!ecgScroll.length) return;
+
+    const t = Date.now() * 0.001 * (bpm/60) * Math.PI*2;
+    const glowPulse = 6 + Math.sin(t)*2;
+    const gridPulse = 0.05 + (Math.sin(t*1.2)*0.05);
+
+    // trailing fade
+    ecgCtx.fillStyle = "rgba(0,0,0,0.2)";
+    ecgCtx.fillRect(0,0,ecgCanvas.width,ecgCanvas.height);
+
+    // pulsing grid
+    const gridSize = 20;
+    ecgCtx.strokeStyle = `rgba(0,255,0,${gridPulse})`;
+    ecgCtx.lineWidth = 1;
+    for(let x=0; x<ecgCanvas.width; x+=gridSize){
+        ecgCtx.beginPath();
+        ecgCtx.moveTo(x,0);
+        ecgCtx.lineTo(x,ecgCanvas.height);
+        ecgCtx.stroke();
+    }
+    for(let y=0; y<ecgCanvas.height; y+=gridSize){
+        ecgCtx.beginPath();
+        ecgCtx.moveTo(0,y);
+        ecgCtx.lineTo(ecgCanvas.width,y);
+        ecgCtx.stroke();
+    }
+
+    // glowing ECG line (centered vertically)
+    ecgCtx.strokeStyle = "#0f0";
+    ecgCtx.lineWidth = 2;
+    ecgCtx.shadowColor = "#0f0";
+    ecgCtx.shadowBlur = glowPulse;
+    ecgCtx.beginPath();
+
+    const min = Math.min(...ecgScroll);
+    const max = Math.max(...ecgScroll);
+    const mean = (max + min) / 2;
+    const scale = (ecgCanvas.height * 0.4) / (max - min || 1); // 40% of canvas height
+
+    for(let i=0; i<ecgScroll.length; i++){
+        const x = i * pointSpacing - scrollOffset;
+        const y = ecgCanvas.height/2 - (ecgScroll[i] - mean) * scale; 
+        if(i===0) ecgCtx.moveTo(x,y);
+        else ecgCtx.lineTo(x,y);
+    }
+    ecgCtx.stroke();
+    ecgCtx.shadowBlur = 0;
+}
+
+// Update ECG scroll
+let lastTime = Date.now();
+function updateECGScroll(){
+    if(!ecgData.length) return;
+    const now = Date.now();
+    const dt = now - lastTime;
+    lastTime = now;
+
+    const beatDuration = 60000 / bpm;
+    const pixelsPerBeat = ecgCanvas.width / beatsVisible;
+    const scrollSpeed = pixelsPerBeat / beatDuration;
+
+    scrollOffset += dt * scrollSpeed;
+
+    while(scrollOffset >= pointSpacing){
+        const point = ecgData.shift();
+        ecgScroll.push(point);
+        ecgData.push(point);
+        if(ecgScroll.length > ecgCanvas.width / pointSpacing + 1) ecgScroll.shift();
+        scrollOffset -= pointSpacing;
+    }
+}
+
+// Update BPM, BP, SpO2, ECG
+function updateValues(){
+    const record = dataRecords[currentIndex];
+    if(!record) return;
+
+    bpm = record.bpm || 70;
+    bpmDisplay.textContent = "BPM: "+bpm;
+    otherValues.textContent = `BP: ${record.bp || '120/80'} | SpO2: ${record.spo2 || 98}%`;
+
+    const ecgArray = Array.isArray(record.ecg) && record.ecg.length ? record.ecg : new Array(10).fill(0);
+    ecgData = ecgArray.slice();
+}
+
+// ------------------ ECG CODE END ------------------
+
+// Animate heart
+function animate(){
+    requestAnimationFrame(animate);
+    if(heart){
+        const t = Date.now()*0.001*(bpm/60)*Math.PI*2;
+        const pulse = 1 + Math.sin(t)*0.10 + Math.sin(t*0.5)*0.03;
+        heart.scale.set(pulse*1.2,pulse*1.2,pulse*1.2);
+    }
+    updateECGScroll();
+    drawECG();
+    renderer.render(scene,camera);
+}
+animate();
+
+// Resize handler
+window.addEventListener("resize", ()=>{
+    camera.aspect = window.innerWidth/window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    ecgCanvas.width = 400;
+    ecgCanvas.height = 300;
+});
+
+// Load JSON data
+fetch("data.json")
+    .then(res=>res.json())
+    .then(data=>{
+        dataRecords = data.records;
+        if(dataRecords.length>0){
+            updateValues();
+            setInterval(nextRecord,2000);
+        }
+    }).catch(console.error);
+
+// Move to next record
+function nextRecord(){
+    currentIndex++;
+    if(currentIndex>=dataRecords.length) currentIndex=0;
+    updateValues();
+}
+</script>
+</body>
+</html>
